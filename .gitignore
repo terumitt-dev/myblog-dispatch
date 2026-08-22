@@ -1,0 +1,11 @@
+# binary
+myblog-dispatch
+
+# env
+.env
+.env.*
+
+# Go
+*.test
+*.out
+vendor/
