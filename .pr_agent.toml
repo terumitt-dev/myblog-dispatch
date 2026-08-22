@@ -1,0 +1,17 @@
+[pr_reviewer]
+extra_instructions="""\
+Emphasize the following:
+- Please use Japanese for everything.
+"""
+
+[pr_description]
+extra_instructions="""\
+Emphasize the following:
+- Please use Japanese for everything.
+"""
+
+[pr_code_suggestions]
+extra_instructions="""\
+Emphasize the following:
+- Please use Japanese for everything.
+"""

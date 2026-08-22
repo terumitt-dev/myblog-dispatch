@@ -1,0 +1,90 @@
+name: AI Approve Bridge
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  pull-requests: write
+  issues: read
+
+jobs:
+  approve:
+    # Claude または Codex の「問題なし」コメントをトリガーに両方を確認して Approve する
+    if: |
+      github.event.issue.pull_request != null &&
+      (
+        (github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
+         contains(github.event.comment.body, 'Didn''t find any major issues')) ||
+        (github.event.comment.user.login == 'claude[bot]' &&
+         (contains(github.event.comment.body, '重大な問題は見当たりませんでした') ||
+          contains(github.event.comment.body, '重大な問題は見つかりませんでした')))
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check both AIs reviewed the current HEAD
+        id: check
+        run: |
+          PR_NUM="${{ github.event.issue.number }}"
+          REPO="${{ github.repository }}"
+
+          HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq .head.sha)
+          SHA_SHORT="${HEAD_SHA:0:10}"
+
+          # Claude: HEAD SHA を含む「問題なし」コメントのみ対象
+          CLAUDE_OK=$(gh api "repos/$REPO/issues/$PR_NUM/comments" \
+            --method GET -F per_page=100 --paginate \
+            | jq --arg sha "$SHA_SHORT" \
+            '[.[] | select(
+              .user.login == "claude[bot]" and
+              (.body | (
+                (contains("重大な問題は見当たりませんでした") or contains("重大な問題は見つかりませんでした")) and
+                contains($sha)
+              ))
+            )] | length')
+
+          # Codex: HEAD SHA を含む「Didn't find any major issues」コメントのみ対象
+          # Codex は「Reviewed commit: XXXXXXXXXX」を自動的にコメントに含める
+          CODEX_OK=$(gh api "repos/$REPO/issues/$PR_NUM/comments" \
+            --method GET -F per_page=100 --paginate \
+            | jq --arg sha "$SHA_SHORT" \
+            '[.[] | select(
+              .user.login == "chatgpt-codex-connector[bot]" and
+              (.body | (contains("Didn'\''t find any major issues") and contains($sha)))
+            )] | length')
+
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "sha_short=$SHA_SHORT"
+          echo "claude_ok=$CLAUDE_OK"
+          echo "codex_ok=$CODEX_OK"
+
+          if [ "$CLAUDE_OK" -gt 0 ] && [ "$CODEX_OK" -gt 0 ]; then
+            echo "both_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "both_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve PR
+        if: steps.check.outputs.both_ok == 'true'
+        run: |
+          PR_NUM="${{ github.event.issue.number }}"
+          REPO="${{ github.repository }}"
+          HEAD_SHA="${{ steps.check.outputs.head_sha }}"
+
+          # TOCTOU 対策: check 時点から HEAD が変わっていないか再確認
+          CURRENT_SHA=$(gh api "repos/$REPO/pulls/$PR_NUM" --jq .head.sha)
+          if [ "$CURRENT_SHA" != "$HEAD_SHA" ]; then
+            echo "HEAD changed after review check. Skipping approval."
+            exit 0
+          fi
+
+          # commit_id を指定して approve を検証済み SHA に紐付ける
+          gh api "repos/$REPO/pulls/$PR_NUM/reviews" \
+            --method POST \
+            -f commit_id="$HEAD_SHA" \
+            -f event="APPROVE" \
+            -f body="Claude + Codex レビュー完了：両 AI が問題なしと判定。承認します。"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,22 @@
+kind: pipeline
+type: kubernetes
+name: base
+
+node_selector:
+  node-role: drone
+tolerations:
+  - key: dedicated
+    value: drone
+    effect: NoSchedule
+
+steps:
+  - name: no-op
+    image: alpine
+    commands:
+      - echo "template repo - no build steps configured"
+
+# 各リポジトリでこのファイルをコピーして以下を追加
+# steps:
+#   - name: check-vars
+#   - name: setup-ecr-auth
+#   - name: build
