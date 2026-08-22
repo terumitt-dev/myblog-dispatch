@@ -7,8 +7,8 @@ import (
 )
 
 type TweetRequest struct {
-	Title string `json:"title" validate:"required"`
-	URL   string `json:"url"   validate:"required"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
 }
 
 type TweetResponse struct {

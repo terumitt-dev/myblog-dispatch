@@ -2,8 +2,9 @@ module github.com/terumitt-dev/myblog-dispatch
 
 go 1.27.0
 
+require github.com/labstack/echo/v4 v4.15.4
+
 require (
-	github.com/labstack/echo/v4 v4.15.4 // indirect
 	github.com/labstack/gommon v0.5.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect

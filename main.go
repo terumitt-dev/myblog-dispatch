@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -25,5 +26,10 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	e.Logger.Fatal(e.Start(":" + port))
+	s := &http.Server{
+		Addr:              ":" + port,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+	}
+	e.Logger.Fatal(e.StartServer(s))
 }
