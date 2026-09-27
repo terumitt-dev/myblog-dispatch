@@ -23,7 +23,15 @@ import (
 // ErrHeld は他の Pod が有効なロックを保持している場合に返される。
 var ErrHeld = errors.New("lease lock is held by another holder")
 
-const defaultLeaseDuration = 30 * time.Second
+// defaultLeaseDuration は保護対象の処理（X へのリフレッシュ + Secret への
+// 保存リトライ）が最悪ケースでかかりうる時間よりも十分長く設定する必要がある。
+// xauth.Manager の想定ワースト: リフレッシュ HTTP 呼び出し最大10秒
+// + saveWithRetry 最大3回 × 15秒タイムアウト + リトライ間隔 500ms×2
+// ≈ 56秒。処理中に Lease を更新（renew）していないため、保護区間全体を
+// カバーできる十分なマージンを持たせている。
+// この値と xauth.Manager 側のタイムアウト/リトライ設定は密結合なので、
+// 一方を変更する際はもう一方も見直すこと。
+const defaultLeaseDuration = 120 * time.Second
 
 // Lease は coordination.k8s.io/v1 の Lease オブジェクトを使ったロック。
 type Lease struct {
@@ -113,9 +121,41 @@ func (l *Lease) Acquire(ctx context.Context) error {
 }
 
 // Release はロックを解放する（Lease オブジェクトを削除する）。
+//
+// 保護区間の実行が Lease の有効期限を超え、既に別 Pod が期限切れ Lease を
+// 引き継いでいた場合、無条件に削除すると「引き継いだ Pod がまだ処理中な
+// のに第三の Pod がロックを取得できてしまう」事故になる。そのため、
+// 削除前に現在の保持者が自分自身であることを確認し、さらに
+// resourceVersion による条件付き削除で TOCTOU レースも防ぐ。
 func (l *Lease) Release(ctx context.Context) error {
-	err := l.client.CoordinationV1().Leases(l.namespace).Delete(ctx, l.name, metav1.DeleteOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
+	leases := l.client.CoordinationV1().Leases(l.namespace)
+
+	existing, err := leases.Get(ctx, l.name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get lease before release: %w", err)
+	}
+
+	if existing.Spec.HolderIdentity == nil || *existing.Spec.HolderIdentity != l.holderID {
+		// 既に別 Pod に引き継がれている。自分のロックではないので何もしない。
+		return nil
+	}
+
+	resourceVersion := existing.ResourceVersion
+	uid := existing.UID
+	err = leases.Delete(ctx, l.name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{
+			UID:             &uid,
+			ResourceVersion: &resourceVersion,
+		},
+	})
+	if err != nil {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			// 削除しようとした瞬間に別 Pod が引き継いだ。問題ない。
+			return nil
+		}
 		return fmt.Errorf("delete lease: %w", err)
 	}
 	return nil
