@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -8,7 +9,24 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/terumitt-dev/myblog-dispatch/handler"
+	"github.com/terumitt-dev/myblog-dispatch/internal/tokenstore"
+	"github.com/terumitt-dev/myblog-dispatch/internal/xauth"
 )
+
+func mustGetenv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("required environment variable %s is not set", key)
+	}
+	return v
+}
+
+func getenvDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 
 func main() {
 	e := echo.New()
@@ -20,7 +38,25 @@ func main() {
 		return c.JSON(http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	e.POST("/tweet", handler.Tweet)
+	namespace := getenvDefault("TOKEN_SECRET_NAMESPACE", "go-lilaregard")
+	secretName := getenvDefault("TOKEN_SECRET_NAME", "myblog-dispatch-x-tokens")
+
+	store, err := tokenstore.NewInCluster(namespace, secretName)
+	if err != nil {
+		log.Fatalf("failed to initialize token store: %v", err)
+	}
+
+	xCfg := xauth.Config{
+		ClientID:     mustGetenv("X_CLIENT_ID"),
+		ClientSecret: mustGetenv("X_CLIENT_SECRET"),
+	}
+	manager := xauth.NewManager(store, xCfg, &http.Client{Timeout: 10 * time.Second})
+
+	tweetHandler := &handler.TweetHandler{
+		Manager:    manager,
+		HTTPClient: &http.Client{Timeout: 10 * time.Second},
+	}
+	e.POST("/tweet", tweetHandler.Tweet)
 
 	port := os.Getenv("PORT")
 	if port == "" {
