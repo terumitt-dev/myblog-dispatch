@@ -10,6 +10,8 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/terumitt-dev/myblog-dispatch/handler"
 	"github.com/terumitt-dev/myblog-dispatch/internal/authmw"
+	"github.com/terumitt-dev/myblog-dispatch/internal/distlock"
+	"github.com/terumitt-dev/myblog-dispatch/internal/k8sclient"
 	"github.com/terumitt-dev/myblog-dispatch/internal/tokenstore"
 	"github.com/terumitt-dev/myblog-dispatch/internal/xauth"
 )
@@ -41,17 +43,22 @@ func main() {
 
 	namespace := getenvDefault("TOKEN_SECRET_NAMESPACE", "go-lilaregard")
 	secretName := getenvDefault("TOKEN_SECRET_NAME", "myblog-dispatch-x-tokens")
+	leaseName := getenvDefault("TOKEN_REFRESH_LEASE_NAME", "myblog-dispatch-x-refresh-lock")
 
-	store, err := tokenstore.NewInCluster(namespace, secretName)
+	k8sClient, err := k8sclient.InCluster()
 	if err != nil {
-		log.Fatalf("failed to initialize token store: %v", err)
+		log.Fatalf("failed to initialize k8s client: %v", err)
 	}
+	store := tokenstore.New(k8sClient, namespace, secretName)
+	// 複数レプリカ構成でも Refresh Token のローテーション競合が起きないよう、
+	// リフレッシュ処理を Lease でクラスタ全体に直列化する。
+	refreshLock := distlock.New(k8sClient, namespace, leaseName, "")
 
 	xCfg := xauth.Config{
 		ClientID:     mustGetenv("X_CLIENT_ID"),
 		ClientSecret: mustGetenv("X_CLIENT_SECRET"),
 	}
-	manager := xauth.NewManager(store, xCfg, &http.Client{Timeout: 10 * time.Second})
+	manager := xauth.NewManager(store, xCfg, &http.Client{Timeout: 10 * time.Second}, refreshLock)
 
 	tweetHandler := &handler.TweetHandler{
 		Manager:    manager,

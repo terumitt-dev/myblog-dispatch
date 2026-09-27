@@ -2,11 +2,13 @@ package xauth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
+	"github.com/terumitt-dev/myblog-dispatch/internal/distlock"
 	"github.com/terumitt-dev/myblog-dispatch/internal/tokenstore"
 )
 
@@ -17,14 +19,19 @@ type Manager struct {
 	store      *tokenstore.Store
 	cfg        Config
 	httpClient *http.Client
+	// lock はクラスタ全体 (複数 Pod 間) でのリフレッシュ直列化に使う。
+	// nil の場合はプロセス内 mutex のみで保護する (単一レプリカ想定)。
+	lock *distlock.Lease
 }
 
-// NewManager は Manager を構築する。
-func NewManager(store *tokenstore.Store, cfg Config, httpClient *http.Client) *Manager {
+// NewManager は Manager を構築する。lock は複数レプリカ環境で
+// リフレッシュ処理を直列化するために使う。単一レプリカのみの場合は
+// nil を渡してよい。
+func NewManager(store *tokenstore.Store, cfg Config, httpClient *http.Client, lock *distlock.Lease) *Manager {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Manager{store: store, cfg: cfg, httpClient: httpClient}
+	return &Manager{store: store, cfg: cfg, httpClient: httpClient, lock: lock}
 }
 
 // ValidAccessToken は有効な Access Token を返す。期限切れの場合は
@@ -40,6 +47,30 @@ func (m *Manager) ValidAccessToken(ctx context.Context) (string, error) {
 
 	if !tokens.Expired() {
 		return tokens.AccessToken, nil
+	}
+
+	if m.lock != nil {
+		if err := m.lock.Acquire(ctx); err != nil {
+			if errors.Is(err, distlock.ErrHeld) {
+				return "", fmt.Errorf("refresh already in progress on another pod, please retry: %w", err)
+			}
+			return "", fmt.Errorf("acquire refresh lock: %w", err)
+		}
+		defer func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = m.lock.Release(releaseCtx)
+		}()
+
+		// ロック取得を待っている間に他 Pod が既にリフレッシュを完了させている
+		// かもしれないため、ロック取得後に最新の状態を読み直す。
+		tokens, err = m.store.Get(ctx)
+		if err != nil {
+			return "", fmt.Errorf("reload tokens after lock: %w", err)
+		}
+		if !tokens.Expired() {
+			return tokens.AccessToken, nil
+		}
 	}
 
 	refreshed, err := refreshAccessToken(ctx, m.httpClient, m.cfg, tokens.RefreshToken)

@@ -11,7 +11,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+
+	"github.com/terumitt-dev/myblog-dispatch/internal/k8sclient"
 )
 
 const (
@@ -40,22 +41,19 @@ type Store struct {
 	secretName string
 }
 
-// NewForTest はテストコードから fake clientset を注入して Store を構築するためのヘルパー。
-func NewForTest(client kubernetes.Interface, namespace, secretName string) *Store {
+// New は任意の clientset を注入して Store を構築する。
+// 本番コードでは InCluster、テストでは fake clientset を渡す。
+func New(client kubernetes.Interface, namespace, secretName string) *Store {
 	return &Store{client: client, namespace: namespace, secretName: secretName}
 }
 
 // NewInCluster は Pod 内の ServiceAccount 資格情報を使って Store を構築する。
 func NewInCluster(namespace, secretName string) (*Store, error) {
-	cfg, err := rest.InClusterConfig()
+	client, err := k8sclient.InCluster()
 	if err != nil {
-		return nil, fmt.Errorf("in-cluster config: %w", err)
+		return nil, err
 	}
-	clientset, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("build clientset: %w", err)
-	}
-	return &Store{client: clientset, namespace: namespace, secretName: secretName}, nil
+	return New(client, namespace, secretName), nil
 }
 
 // Get は Secret から現在のトークンを読み込む。
