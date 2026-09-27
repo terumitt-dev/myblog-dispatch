@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/terumitt-dev/myblog-dispatch/handler"
+	"github.com/terumitt-dev/myblog-dispatch/internal/authmw"
 	"github.com/terumitt-dev/myblog-dispatch/internal/tokenstore"
 	"github.com/terumitt-dev/myblog-dispatch/internal/xauth"
 )
@@ -56,7 +57,8 @@ func main() {
 		Manager:    manager,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
 	}
-	e.POST("/tweet", tweetHandler.Tweet)
+	dispatchAPIKey := mustGetenv("DISPATCH_API_KEY")
+	e.POST("/tweet", tweetHandler.Tweet, authmw.APIKey(dispatchAPIKey))
 
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -97,6 +97,9 @@ func (s *Store) Save(ctx context.Context, tokens Tokens) error {
 		return fmt.Errorf("get secret before update: %w", err)
 	}
 
+	if current.Data == nil {
+		current.Data = map[string][]byte{}
+	}
 	current.Data[keyAccessToken] = patch.Data[keyAccessToken]
 	current.Data[keyRefreshToken] = patch.Data[keyRefreshToken]
 	current.Data[keyExpiresAt] = patch.Data[keyExpiresAt]

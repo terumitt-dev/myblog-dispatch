@@ -77,6 +77,20 @@ func TestTokens_Expired(t *testing.T) {
 	}
 }
 
+func TestStore_Save_NilData(t *testing.T) {
+	// Secret に data: フィールドが存在しない (nil map) 状態を再現する。
+	store := newFakeStore(t, nil)
+
+	err := store.Save(context.Background(), Tokens{
+		AccessToken:  "a",
+		RefreshToken: "b",
+		ExpiresAt:    time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("Save with nil Data returned error: %v", err)
+	}
+}
+
 func TestStore_Save_SecretNotFound(t *testing.T) {
 	client := fake.NewClientset()
 	store := &Store{client: client, namespace: "test-ns", secretName: "missing"}
