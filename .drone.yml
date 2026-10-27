@@ -19,6 +19,9 @@ tolerations:
 steps:
   - name: check-vars
     image: alpine
+    when:
+      branch: [main]
+      event: [push]
     environment:
       AWS_REGION:
         from_secret: AWS_REGION
