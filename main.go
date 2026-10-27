@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"github.com/terumitt-dev/myblog-dispatch/internal/authmw"
 	"github.com/terumitt-dev/myblog-dispatch/internal/distlock"
 	"github.com/terumitt-dev/myblog-dispatch/internal/k8sclient"
+	"github.com/terumitt-dev/myblog-dispatch/internal/oauthflow"
+	"github.com/terumitt-dev/myblog-dispatch/internal/secretsmanager"
 	"github.com/terumitt-dev/myblog-dispatch/internal/tokenstore"
 	"github.com/terumitt-dev/myblog-dispatch/internal/xauth"
 )
@@ -54,9 +57,17 @@ func main() {
 	// リフレッシュ処理を Lease でクラスタ全体に直列化する。
 	refreshLock := distlock.New(k8sClient, namespace, leaseName, "")
 
+	// X_CLIENT_ID / X_CLIENT_SECRET は Drone secrets 経由の k8s Secret 注入ではなく、
+	// AWS SDK のデフォルト認証チェーン (EC2インスタンスプロファイル) 経由で
+	// Secrets Manager から直接取得する。
+	oauthSecretID := getenvDefault("X_OAUTH_SECRET_ID", "myblog-dispatch/x-oauth-client")
+	creds, err := secretsmanager.FetchXOAuthCredentials(context.Background(), oauthSecretID)
+	if err != nil {
+		log.Fatalf("failed to fetch X OAuth credentials from Secrets Manager: %v", err)
+	}
 	xCfg := xauth.Config{
-		ClientID:     mustGetenv("X_CLIENT_ID"),
-		ClientSecret: mustGetenv("X_CLIENT_SECRET"),
+		ClientID:     creds.ClientID,
+		ClientSecret: creds.ClientSecret,
 	}
 	manager := xauth.NewManager(store, xCfg, &http.Client{Timeout: 10 * time.Second}, refreshLock)
 
@@ -66,6 +77,21 @@ func main() {
 	}
 	dispatchAPIKey := mustGetenv("DISPATCH_API_KEY")
 	e.POST("/tweet", tweetHandler.Tweet, authmw.APIKey(dispatchAPIKey))
+
+	// X連携(OAuth Authorization Code + PKCE)のconnect/callbackは、
+	// myblog-backendからサーバー間通信でのみ呼ばれる想定 (X-Dispatch-Key必須)。
+	// Xからのリダイレクト自体はbackendの公開ドメインで受け、backendがcode/state
+	// をここに転送する。state/code_verifierはプロセスメモリでTTL管理し、
+	// 使い捨てにする (replicas=1運用が前提、複数レプリカにする場合は要見直し)。
+	oauthHandler := &handler.OAuthHandler{
+		Config:      xCfg,
+		RedirectURI: mustGetenv("X_OAUTH_REDIRECT_URI"),
+		States:      oauthflow.NewStore(5 * time.Minute),
+		Store:       store,
+		HTTPClient:  &http.Client{Timeout: 10 * time.Second},
+	}
+	e.POST("/oauth/connect", oauthHandler.Connect, authmw.APIKey(dispatchAPIKey))
+	e.POST("/oauth/callback", oauthHandler.Callback, authmw.APIKey(dispatchAPIKey))
 
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -91,12 +91,23 @@ func TestStore_Save_NilData(t *testing.T) {
 	}
 }
 
-func TestStore_Save_SecretNotFound(t *testing.T) {
+func TestStore_Save_CreatesSecretWhenMissing(t *testing.T) {
+	// OAuth連携ボタンでの初回連携時は、Secretがまだ存在しない状態で
+	// Saveが呼ばれる。その場合は新規作成されることを確認する。
 	client := fake.NewClientset()
-	store := &Store{client: client, namespace: "test-ns", secretName: "missing"}
+	store := &Store{client: client, namespace: "test-ns", secretName: "x-tokens"}
 
-	err := store.Save(context.Background(), Tokens{AccessToken: "a", RefreshToken: "b", ExpiresAt: time.Now()})
-	if err == nil {
-		t.Fatal("expected error when secret does not exist, got nil")
+	now := time.Now().Truncate(time.Second)
+	tokens := Tokens{AccessToken: "a", RefreshToken: "b", ExpiresAt: now.Add(time.Hour)}
+	if err := store.Save(context.Background(), tokens); err != nil {
+		t.Fatalf("Save returned error for missing secret: %v", err)
+	}
+
+	got, err := store.Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get after Save returned error: %v", err)
+	}
+	if got.AccessToken != "a" || got.RefreshToken != "b" {
+		t.Fatalf("unexpected tokens after create: %+v", got)
 	}
 }

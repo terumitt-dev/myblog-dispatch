@@ -76,21 +76,30 @@ func (s *Store) Get(ctx context.Context) (Tokens, error) {
 	}, nil
 }
 
-// Save は新しいトークンを Secret に書き戻す。
+// Save は新しいトークンを Secret に書き戻す。Secret がまだ存在しない場合
+// (OAuth 連携ボタンでの初回連携時など) は新規作成する。
 func (s *Store) Save(ctx context.Context, tokens Tokens) error {
-	patch := corev1.Secret{
-		Data: map[string][]byte{
-			keyAccessToken:  []byte(tokens.AccessToken),
-			keyRefreshToken: []byte(tokens.RefreshToken),
-			keyExpiresAt:    []byte(strconv.FormatInt(tokens.ExpiresAt.Unix(), 10)),
-		},
+	data := map[string][]byte{
+		keyAccessToken:  []byte(tokens.AccessToken),
+		keyRefreshToken: []byte(tokens.RefreshToken),
+		keyExpiresAt:    []byte(strconv.FormatInt(tokens.ExpiresAt.Unix(), 10)),
 	}
 
 	secretsClient := s.client.CoreV1().Secrets(s.namespace)
 	current, err := secretsClient.Get(ctx, s.secretName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return fmt.Errorf("secret %s/%s not found: it must be pre-created by ops", s.namespace, s.secretName)
+			newSecret := corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      s.secretName,
+					Namespace: s.namespace,
+				},
+				Data: data,
+			}
+			if _, err := secretsClient.Create(ctx, &newSecret, metav1.CreateOptions{}); err != nil {
+				return fmt.Errorf("create secret %s/%s: %w", s.namespace, s.secretName, err)
+			}
+			return nil
 		}
 		return fmt.Errorf("get secret before update: %w", err)
 	}
@@ -98,9 +107,9 @@ func (s *Store) Save(ctx context.Context, tokens Tokens) error {
 	if current.Data == nil {
 		current.Data = map[string][]byte{}
 	}
-	current.Data[keyAccessToken] = patch.Data[keyAccessToken]
-	current.Data[keyRefreshToken] = patch.Data[keyRefreshToken]
-	current.Data[keyExpiresAt] = patch.Data[keyExpiresAt]
+	current.Data[keyAccessToken] = data[keyAccessToken]
+	current.Data[keyRefreshToken] = data[keyRefreshToken]
+	current.Data[keyExpiresAt] = data[keyExpiresAt]
 
 	if _, err := secretsClient.Update(ctx, current, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("update secret %s/%s: %w", s.namespace, s.secretName, err)
