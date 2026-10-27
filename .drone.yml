@@ -1,6 +1,13 @@
+# =========================
+# CI/CD Pipeline
+# =========================
 kind: pipeline
 type: kubernetes
-name: base
+name: ci-cd
+
+trigger:
+  event: [push, pull_request]
+  branch: [main, develop]
 
 node_selector:
   node-role: drone
@@ -10,13 +17,63 @@ tolerations:
     effect: NoSchedule
 
 steps:
-  - name: no-op
+  - name: check-vars
     image: alpine
+    environment:
+      AWS_REGION:
+        from_secret: AWS_REGION
+      AWS_ACCESS_KEY_ID:
+        from_secret: AWS_ACCESS_KEY_ID
+      AWS_SECRET_ACCESS_KEY:
+        from_secret: AWS_SECRET_ACCESS_KEY
+      ECR_REGISTRY:
+        from_secret: ECR_REGISTRY
     commands:
-      - echo "template repo - no build steps configured"
+      - set -euxo pipefail
+      - '[ -n "$AWS_REGION" ]'
+      - '[ -n "$AWS_ACCESS_KEY_ID" ]'
+      - '[ -n "$AWS_SECRET_ACCESS_KEY" ]'
+      - '[ -n "$ECR_REGISTRY" ]'
 
-# 各リポジトリでこのファイルをコピーして以下を追加
-# steps:
-#   - name: check-vars
-#   - name: setup-ecr-auth
-#   - name: build
+  - name: setup-ecr-auth
+    image: amazon/aws-cli:latest
+    when:
+      branch: [main]
+      event: [push]
+    environment:
+      AWS_REGION:
+        from_secret: AWS_REGION
+      AWS_ACCESS_KEY_ID:
+        from_secret: AWS_ACCESS_KEY_ID
+      AWS_SECRET_ACCESS_KEY:
+        from_secret: AWS_SECRET_ACCESS_KEY
+      ECR_REGISTRY:
+        from_secret: ECR_REGISTRY
+    commands:
+      - mkdir -p /drone/src/.docker
+      - |
+        ECR_TOKEN=$(aws ecr get-login-password --region "$AWS_REGION")
+        AUTH=$(printf 'AWS:%s' "$ECR_TOKEN" | base64 -w 0)
+        printf '{"auths":{"%s":{"auth":"%s"}}}' "$ECR_REGISTRY" "$AUTH" > /drone/src/.docker/config.json
+      - echo "ECR auth config written"
+
+  - name: build
+    image: gcr.io/kaniko-project/executor:debug
+    environment:
+      ECR_REGISTRY:
+        from_secret: ECR_REGISTRY
+      DOCKER_CONFIG: /drone/src/.docker
+    commands:
+      - |
+        if [ "$DRONE_BRANCH" = "main" ] && [ "$DRONE_BUILD_EVENT" = "push" ]; then
+          /kaniko/executor \
+            --context=dir:///drone/src \
+            --dockerfile=/drone/src/Dockerfile \
+            --destination="$ECR_REGISTRY/go-lilaregard-dispatch:$DRONE_COMMIT_SHA" \
+            --destination="$ECR_REGISTRY/go-lilaregard-dispatch:latest"
+        else
+          /kaniko/executor \
+            --context=dir:///drone/src \
+            --dockerfile=/drone/src/Dockerfile \
+            --no-push
+        fi
