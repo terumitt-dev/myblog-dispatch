@@ -88,20 +88,28 @@ func (s *Store) Save(ctx context.Context, tokens Tokens) error {
 	secretsClient := s.client.CoreV1().Secrets(s.namespace)
 	current, err := secretsClient.Get(ctx, s.secretName, metav1.GetOptions{})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			newSecret := corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      s.secretName,
-					Namespace: s.namespace,
-				},
-				Data: data,
-			}
-			if _, err := secretsClient.Create(ctx, &newSecret, metav1.CreateOptions{}); err != nil {
-				return fmt.Errorf("create secret %s/%s: %w", s.namespace, s.secretName, err)
-			}
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("get secret before update: %w", err)
+		}
+		newSecret := corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      s.secretName,
+				Namespace: s.namespace,
+			},
+			Data: data,
+		}
+		_, createErr := secretsClient.Create(ctx, &newSecret, metav1.CreateOptions{})
+		if createErr == nil {
 			return nil
 		}
-		return fmt.Errorf("get secret before update: %w", err)
+		if !apierrors.IsAlreadyExists(createErr) {
+			return fmt.Errorf("create secret %s/%s: %w", s.namespace, s.secretName, createErr)
+		}
+		// Get と Create の間に別リクエストが先に作成した場合は、更新にフォールバックする。
+		current, err = secretsClient.Get(ctx, s.secretName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get secret after concurrent create: %w", err)
+		}
 	}
 
 	if current.Data == nil {

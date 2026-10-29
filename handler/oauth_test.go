@@ -24,7 +24,7 @@ func newTestOAuthHandler(t *testing.T) (*OAuthHandler, *tokenstore.Store) {
 		Config:      xauth.Config{ClientID: "client-id", ClientSecret: "client-secret"},
 		RedirectURI: "https://example.com/callback",
 		States:      oauthflow.NewStore(5 * time.Minute),
-		Store:       store,
+		Manager:     xauth.NewManager(store, xauth.Config{ClientID: "client-id", ClientSecret: "client-secret"}, nil, nil),
 		HTTPClient:  &http.Client{Timeout: 5 * time.Second},
 	}, store
 }

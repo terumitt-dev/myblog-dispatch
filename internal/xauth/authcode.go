@@ -20,6 +20,20 @@ var authorizeEndpoint = "https://twitter.com/i/oauth2/authorize"
 // refresh_token が発行されない。
 const oauthScopes = "tweet.read tweet.write users.read offline.access"
 
+const (
+	// maxExchangeResponseBytes はトークン交換レスポンスの読み取り上限。
+	maxExchangeResponseBytes = 1 << 20
+	// maxLoggedBodyBytes はエラーメッセージ (=ログ) に含めるレスポンスボディの上限。
+	maxLoggedBodyBytes = 512
+)
+
+func truncateForLog(body []byte) string {
+	if len(body) <= maxLoggedBodyBytes {
+		return string(body)
+	}
+	return string(body[:maxLoggedBodyBytes]) + "...(truncated)"
+}
+
 // CodeChallenge は PKCE の code_verifier から code_challenge (S256) を導出する。
 func CodeChallenge(codeVerifier string) string {
 	sum := sha256.Sum256([]byte(codeVerifier))
@@ -63,13 +77,13 @@ func ExchangeAuthorizationCode(ctx context.Context, httpClient *http.Client, cfg
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxExchangeResponseBytes))
 	if err != nil {
 		return RefreshResult{}, fmt.Errorf("read authorization code exchange response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return RefreshResult{}, fmt.Errorf("authorization code exchange failed: status=%d body=%s", resp.StatusCode, string(body))
+		return RefreshResult{}, fmt.Errorf("authorization code exchange failed: status=%d body=%s", resp.StatusCode, truncateForLog(body))
 	}
 
 	var parsed refreshResponse

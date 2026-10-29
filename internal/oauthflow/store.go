@@ -11,6 +11,7 @@ package oauthflow
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -19,7 +20,13 @@ import (
 const (
 	stateByteLength        = 32 // base64url で約43文字
 	codeVerifierByteLength = 64 // base64url で約86文字 (PKCE仕様の43〜128文字に収まる)
+
+	// maxPending は TTL 内に同時保持する state の上限。連打によるメモリ増加を防ぐ。
+	maxPending = 100
 )
+
+// ErrTooManyPending は保持中の state が上限に達していることを表す。
+var ErrTooManyPending = errors.New("too many pending oauth states")
 
 type pendingAuth struct {
 	codeVerifier string
@@ -55,6 +62,9 @@ func (s *Store) New() (state, codeVerifier string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.evictExpiredLocked()
+	if len(s.states) >= maxPending {
+		return "", "", ErrTooManyPending
+	}
 	s.states[state] = pendingAuth{codeVerifier: codeVerifier, createdAt: time.Now()}
 
 	return state, codeVerifier, nil

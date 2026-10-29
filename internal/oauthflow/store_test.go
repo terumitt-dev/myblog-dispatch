@@ -1,6 +1,7 @@
 package oauthflow
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -61,6 +62,18 @@ func TestStore_Consume_Expired(t *testing.T) {
 
 	if _, ok := s.Consume(state); ok {
 		t.Fatal("expected Consume of expired state to fail")
+	}
+}
+
+func TestStore_New_RejectsWhenFull(t *testing.T) {
+	s := NewStore(5 * time.Minute)
+	for i := 0; i < maxPending; i++ {
+		if _, _, err := s.New(); err != nil {
+			t.Fatalf("New #%d returned error: %v", i, err)
+		}
+	}
+	if _, _, err := s.New(); !errors.Is(err, ErrTooManyPending) {
+		t.Fatalf("expected ErrTooManyPending, got %v", err)
 	}
 }
 

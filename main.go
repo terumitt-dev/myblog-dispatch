@@ -61,7 +61,9 @@ func main() {
 	// AWS SDK のデフォルト認証チェーン (EC2インスタンスプロファイル) 経由で
 	// Secrets Manager から直接取得する。
 	oauthSecretID := getenvDefault("X_OAUTH_SECRET_ID", "myblog-dispatch/x-oauth-client")
-	creds, err := secretsmanager.FetchXOAuthCredentials(context.Background(), oauthSecretID)
+	fetchCtx, cancelFetch := context.WithTimeout(context.Background(), 20*time.Second)
+	creds, err := secretsmanager.FetchXOAuthCredentials(fetchCtx, oauthSecretID)
+	cancelFetch()
 	if err != nil {
 		log.Fatalf("failed to fetch X OAuth credentials from Secrets Manager: %v", err)
 	}
@@ -87,7 +89,7 @@ func main() {
 		Config:      xCfg,
 		RedirectURI: mustGetenv("X_OAUTH_REDIRECT_URI"),
 		States:      oauthflow.NewStore(5 * time.Minute),
-		Store:       store,
+		Manager:     manager,
 		HTTPClient:  &http.Client{Timeout: 10 * time.Second},
 	}
 	e.POST("/oauth/connect", oauthHandler.Connect, authmw.APIKey(dispatchAPIKey))

@@ -96,6 +96,31 @@ func (m *Manager) ValidAccessToken(ctx context.Context) (string, error) {
 	return newTokens.AccessToken, nil
 }
 
+// StoreConnectedTokens は OAuth 連携 (Authorization Code) で取得した新しい
+// トークンを保存する。進行中の自動リフレッシュ (ValidAccessToken) と同じ
+// mutex / Lease で直列化することで、「旧アカウントのリフレッシュ結果が、
+// 連携直後の新アカウントのトークンを後から上書きする」競合を防ぐ。
+func (m *Manager) StoreConnectedTokens(ctx context.Context, tokens tokenstore.Tokens) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.lock != nil {
+		if err := m.lock.Acquire(ctx); err != nil {
+			if errors.Is(err, distlock.ErrHeld) {
+				return fmt.Errorf("refresh in progress on another pod, please retry: %w", err)
+			}
+			return fmt.Errorf("acquire refresh lock: %w", err)
+		}
+		defer func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = m.lock.Release(releaseCtx)
+		}()
+	}
+
+	return m.saveWithRetry(tokens)
+}
+
 func (m *Manager) saveWithRetry(tokens tokenstore.Tokens) error {
 	const (
 		maxAttempts = 3

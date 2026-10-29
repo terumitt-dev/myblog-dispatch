@@ -155,6 +155,97 @@ func TestManager_ValidAccessToken_SavesEvenIfRequestContextCancelledAfterRefresh
 	}
 }
 
+// TestManager_StoreConnectedTokens_WaitsForInProgressRefresh は、進行中の
+// リフレッシュが完了するまで連携トークンの保存が待たされ、結果として
+// 連携で取得したトークンが最後に保存される (後から旧トークンに上書きされない)
+// ことを検証する。
+func TestManager_StoreConnectedTokens_WaitsForInProgressRefresh(t *testing.T) {
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(refreshStarted)
+		<-releaseRefresh
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "old-account-access",
+			"refresh_token": "old-account-refresh",
+			"expires_in":    7200,
+		})
+	}))
+	defer server.Close()
+	tokenEndpoint = server.URL
+
+	past := time.Now().Add(-time.Hour).Unix()
+	store := newTestStore(t, map[string][]byte{
+		"access_token":  []byte("expired"),
+		"refresh_token": []byte("old-refresh"),
+		"expires_at":    []byte(strconv.FormatInt(past, 10)),
+	})
+	manager := NewManager(store, Config{ClientID: "id", ClientSecret: "secret"}, server.Client(), nil)
+
+	refreshDone := make(chan struct{})
+	go func() {
+		defer close(refreshDone)
+		_, _ = manager.ValidAccessToken(t.Context())
+	}()
+	<-refreshStarted
+
+	connectDone := make(chan error, 1)
+	go func() {
+		connectDone <- manager.StoreConnectedTokens(t.Context(), tokenstore.Tokens{
+			AccessToken:  "new-account-access",
+			RefreshToken: "new-account-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+		})
+	}()
+
+	select {
+	case <-connectDone:
+		t.Fatal("StoreConnectedTokens finished while a refresh was still in progress")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseRefresh)
+	<-refreshDone
+	if err := <-connectDone; err != nil {
+		t.Fatalf("StoreConnectedTokens returned error: %v", err)
+	}
+
+	saved, err := store.Get(t.Context())
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if saved.AccessToken != "new-account-access" {
+		t.Fatalf("saved access token = %q, want new-account-access (connected tokens must win)", saved.AccessToken)
+	}
+}
+
+// TestManager_StoreConnectedTokens_BlockedByOtherPodLock は、他 Pod がリフレッシュ用
+// ロックを保持している間は保存を試みずにエラーを返すことを検証する。
+func TestManager_StoreConnectedTokens_BlockedByOtherPodLock(t *testing.T) {
+	store, client := newTestStoreAndClient(t, map[string][]byte{
+		"access_token":  []byte("existing"),
+		"refresh_token": []byte("existing"),
+		"expires_at":    []byte(strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)),
+	})
+
+	otherPodLock := distlock.New(client, "test-ns", "refresh-lock", "pod-other")
+	if err := otherPodLock.Acquire(t.Context()); err != nil {
+		t.Fatalf("otherPodLock.Acquire returned error: %v", err)
+	}
+
+	manager := NewManager(store, Config{}, nil, distlock.New(client, "test-ns", "refresh-lock", "pod-me"))
+	err := manager.StoreConnectedTokens(t.Context(), tokenstore.Tokens{AccessToken: "x", RefreshToken: "y", ExpiresAt: time.Now().Add(time.Hour)})
+	if !errors.Is(err, distlock.ErrHeld) {
+		t.Fatalf("error = %v, want wrapping distlock.ErrHeld", err)
+	}
+
+	saved, _ := store.Get(t.Context())
+	if saved.AccessToken != "existing" {
+		t.Fatalf("tokens were overwritten despite lock held by another pod: %+v", saved)
+	}
+}
+
 // TestManager_ValidAccessToken_BlockedByOtherPodLock は、他 Pod が既に
 // リフレッシュ用ロックを保持している場合、ValidAccessToken がリフレッシュを
 // 試みずにエラーを返すことを検証する。

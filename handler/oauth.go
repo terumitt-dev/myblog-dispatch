@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -21,8 +22,9 @@ type OAuthHandler struct {
 	Config      xauth.Config
 	RedirectURI string
 	States      *oauthflow.Store
-	Store       *tokenstore.Store
-	HTTPClient  *http.Client
+	// Manager はトークン保存を自動リフレッシュと同じ排他制御で行うために使う。
+	Manager    *xauth.Manager
+	HTTPClient *http.Client
 }
 
 // ConnectResponse は認可URL発行結果。
@@ -34,6 +36,9 @@ type ConnectResponse struct {
 func (h *OAuthHandler) Connect(c echo.Context) error {
 	state, codeVerifier, err := h.States.New()
 	if err != nil {
+		if errors.Is(err, oauthflow.ErrTooManyPending) {
+			return c.JSON(http.StatusTooManyRequests, map[string]string{"error": "too many pending connections, please retry later"})
+		}
 		c.Logger().Errorf("failed to generate oauth state: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to start X connection"})
 	}
@@ -76,7 +81,7 @@ func (h *OAuthHandler) Callback(c echo.Context) error {
 		RefreshToken: result.RefreshToken,
 		ExpiresAt:    time.Now().Add(result.ExpiresIn),
 	}
-	if err := h.Store.Save(ctx, tokens); err != nil {
+	if err := h.Manager.StoreConnectedTokens(ctx, tokens); err != nil {
 		c.Logger().Errorf("failed to save tokens: %v", err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to save X tokens"})
 	}
