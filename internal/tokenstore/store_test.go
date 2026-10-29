@@ -6,8 +6,11 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func newFakeStore(t *testing.T, initial map[string][]byte) *Store {
@@ -91,12 +94,57 @@ func TestStore_Save_NilData(t *testing.T) {
 	}
 }
 
-func TestStore_Save_SecretNotFound(t *testing.T) {
-	client := fake.NewClientset()
-	store := &Store{client: client, namespace: "test-ns", secretName: "missing"}
+// Get と Create の間に別リクエストが先に Secret を作成した状況 (AlreadyExists) でも、
+// 更新にフォールバックして保存に成功することを確認する。
+func TestStore_Save_FallsBackToUpdateOnAlreadyExists(t *testing.T) {
+	store := newFakeStore(t, map[string][]byte{
+		keyAccessToken:  []byte("created-by-other"),
+		keyRefreshToken: []byte("created-by-other"),
+		keyExpiresAt:    []byte("1700000000"),
+	})
+	fakeClient := store.client.(*fake.Clientset)
 
-	err := store.Save(context.Background(), Tokens{AccessToken: "a", RefreshToken: "b", ExpiresAt: time.Now()})
-	if err == nil {
-		t.Fatal("expected error when secret does not exist, got nil")
+	// 最初の Get だけ NotFound を返し、直後の Create は実際に存在するため AlreadyExists になる。
+	first := true
+	fakeClient.PrependReactor("get", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if first {
+			first = false
+			return true, nil, apierrors.NewNotFound(corev1.Resource("secrets"), "x-tokens")
+		}
+		return false, nil, nil
+	})
+
+	tokens := Tokens{AccessToken: "mine", RefreshToken: "mine-refresh", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := store.Save(context.Background(), tokens); err != nil {
+		t.Fatalf("Save returned error on concurrent create: %v", err)
+	}
+
+	got, err := store.Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get after Save returned error: %v", err)
+	}
+	if got.AccessToken != "mine" || got.RefreshToken != "mine-refresh" {
+		t.Fatalf("tokens not overwritten after fallback: %+v", got)
+	}
+}
+
+func TestStore_Save_CreatesSecretWhenMissing(t *testing.T) {
+	// OAuth連携ボタンでの初回連携時は、Secretがまだ存在しない状態で
+	// Saveが呼ばれる。その場合は新規作成されることを確認する。
+	client := fake.NewClientset()
+	store := &Store{client: client, namespace: "test-ns", secretName: "x-tokens"}
+
+	now := time.Now().Truncate(time.Second)
+	tokens := Tokens{AccessToken: "a", RefreshToken: "b", ExpiresAt: now.Add(time.Hour)}
+	if err := store.Save(context.Background(), tokens); err != nil {
+		t.Fatalf("Save returned error for missing secret: %v", err)
+	}
+
+	got, err := store.Get(context.Background())
+	if err != nil {
+		t.Fatalf("Get after Save returned error: %v", err)
+	}
+	if got.AccessToken != "a" || got.RefreshToken != "b" {
+		t.Fatalf("unexpected tokens after create: %+v", got)
 	}
 }
